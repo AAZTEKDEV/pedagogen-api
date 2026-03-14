@@ -91,7 +91,7 @@ async function initDB() {
     const hash = await bcrypt.hash("admin123", 10);
     await pool.query(
       "INSERT INTO users (role,nom,prenom,email,password) VALUES ($1,$2,$3,$4,$5)",
-      ["admin","Admin","Super","admin@pedagogen.fr", hash]
+      ["admin","Admin","Super","ebrembilla@gmail.com", hash]
     );
     // Gestionnaire démo
     const h2 = await bcrypt.hash("gest123", 10);
