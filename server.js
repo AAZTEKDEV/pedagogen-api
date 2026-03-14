@@ -110,11 +110,11 @@ async function initDB() {
   console.log("✅ Base de données initialisée");
 }
 
-// ════════════════════════════════════════════
+// =================================$
 // AUTH
-// ════════════════════════════════════════════
+// =================================$
 
-// POST /api/auth/login
+
 app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -123,52 +123,12 @@ app.post("/api/auth/login", async (req, res) => {
     const user = rows[0];
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(401).json({ error: "Email ou mot de passe incorrect" });
-
-    // Générer code 2FA
-    const code = String(100000 + Math.floor(Math.random() * 900000));
-    const exp  = new Date(Date.now() + 10 * 60 * 1000); // 10 min
-    await pool.query("DELETE FROM twofa WHERE user_id=$1", [user.id]);
-    await pool.query("INSERT INTO twofa (user_id,code,expires_at) VALUES ($1,$2,$3)", [user.id, code, exp]);
-
-    // Envoyer email
-    await resend.emails.send({
-      from: "PédagoGen <noreply@pedagogen.fr>",
-      to:   user.email,
-      subject: "Votre code de connexion PédagoGen",
-      html: `<div style="font-family:sans-serif;padding:24px">
-        <h2>🔐 Code de vérification</h2>
-        <p>Bonjour ${user.prenom},</p>
-        <div style="font-size:32px;font-weight:bold;letter-spacing:8px;padding:20px;background:#eff6ff;border-radius:8px;text-align:center">${code}</div>
-        <p style="color:#64748b;margin-top:16px">Ce code expire dans 10 minutes.</p>
-      </div>`
-    });
-
-    res.json({ userId: user.id, message: "Code envoyé par email" });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-// POST /api/auth/verify
-app.post("/api/auth/verify", async (req, res) => {
-  const { userId, code } = req.body;
-  try {
-    const { rows } = await pool.query(
-      "SELECT * FROM twofa WHERE user_id=$1 AND code=$2 AND expires_at > NOW()",
-      [userId, code]
-    );
-    if (!rows.length) return res.status(401).json({ error: "Code incorrect ou expiré" });
-
-    await pool.query("DELETE FROM twofa WHERE user_id=$1", [userId]);
-    const { rows: users } = await pool.query("SELECT * FROM users WHERE id=$1", [userId]);
-    const user = users[0];
     const token = jwt.sign(
       { id: user.id, role: user.role, email: user.email },
       process.env.JWT_SECRET,
       { expiresIn: "24h" }
     );
-    const { password, ...safeUser } = user;
+    const { password: _, ...safeUser } = user;
     res.json({ token, user: safeUser });
   } catch (e) {
     console.error(e);
@@ -176,13 +136,8 @@ app.post("/api/auth/verify", async (req, res) => {
   }
 });
 
-// GET /api/auth/me
-app.get("/api/auth/me", auth, async (req, res) => {
-  const { rows } = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-  if (!rows.length) return res.status(404).json({ error: "Utilisateur introuvable" });
-  const { password, ...safeUser } = rows[0];
-  res.json(safeUser);
-});
+
+
 
 // ════════════════════════════════════════════
 // USERS
