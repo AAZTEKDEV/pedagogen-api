@@ -1,11 +1,12 @@
 // ─────────────────────────────────────────────
-// server.js — PédagoGen Backend
+// server.js — PédagoGen Backend v2
 // Node.js + Express + PostgreSQL + JWT + Resend
 // ─────────────────────────────────────────────
 const express    = require("express");
 const cors       = require("cors");
 const bcrypt     = require("bcryptjs");
 const jwt        = require("jsonwebtoken");
+const crypto     = require("crypto");
 const { Pool }   = require("pg");
 const { Resend } = require("resend");
 const Anthropic  = require("@anthropic-ai/sdk");
@@ -27,11 +28,11 @@ const auth = (req, res, next) => {
 };
 const adminOnly = (req, res, next) =>
   req.user.role === "admin" ? next() : res.status(403).json({ error: "Accès refusé" });
-const gestOnly  = (req, res, next) =>
+const gestOnly = (req, res, next) =>
   ["admin","gestionnaire"].includes(req.user.role) ? next() : res.status(403).json({ error: "Accès refusé" });
 
 // ════════════════════════════════════════════
-// INITIALISATION BASE DE DONNÉES
+// INIT BASE DE DONNÉES
 // ════════════════════════════════════════════
 async function initDB() {
   await pool.query(`
@@ -66,40 +67,37 @@ async function initDB() {
       created_at  TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS documents (
-      id         SERIAL PRIMARY KEY,
-      demand_id  INTEGER REFERENCES demands(id) ON DELETE CASCADE,
-      nom        TEXT NOT NULL,
-      file_type  TEXT,
-      taille     INTEGER,
+      id           SERIAL PRIMARY KEY,
+      demand_id    INTEGER REFERENCES demands(id) ON DELETE CASCADE,
+      nom          TEXT NOT NULL,
+      file_type    TEXT,
+      taille       INTEGER,
       text_content TEXT,
-      data_url   TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      data_url     TEXT,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS notes (
-      id         SERIAL PRIMARY KEY,
-      demand_id  INTEGER REFERENCES demands(id) ON DELETE CASCADE,
-      auteur_id  INTEGER REFERENCES users(id),
+      id          SERIAL PRIMARY KEY,
+      demand_id   INTEGER REFERENCES demands(id) ON DELETE CASCADE,
+      auteur_id   INTEGER REFERENCES users(id),
       auteur_role TEXT,
-      texte      TEXT NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      texte       TEXT NOT NULL,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
     );
   `);
 
-  // Créer admin par défaut si absent
   const existing = await pool.query("SELECT id FROM users WHERE role='admin' LIMIT 1");
   if (existing.rows.length === 0) {
-    const hash = await bcrypt.hash("admin123", 10);
+    const h1 = await bcrypt.hash("admin123", 10);
     await pool.query(
       "INSERT INTO users (role,nom,prenom,email,password) VALUES ($1,$2,$3,$4,$5)",
-      ["admin","Admin","Super","ebrembilla@gmail.com", hash]
+      ["admin","Admin","Super","admin@pedagogen.fr", h1]
     );
-    // Gestionnaire démo
     const h2 = await bcrypt.hash("gest123", 10);
     await pool.query(
       "INSERT INTO users (role,nom,prenom,email,password) VALUES ($1,$2,$3,$4,$5)",
       ["gestionnaire","Martin","Léa","lea@pedagogen.fr", h2]
     );
-    // Client démo
     const h3 = await bcrypt.hash("client123", 10);
     await pool.query(
       "INSERT INTO users (role,nom,prenom,email,password,mobile,entreprise,siren) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
@@ -110,11 +108,11 @@ async function initDB() {
   console.log("✅ Base de données initialisée");
 }
 
-// =================================$
+// ════════════════════════════════════════════
 // AUTH
-// =================================$
+// ════════════════════════════════════════════
 
-
+// POST /api/auth/login — sans 2FA
 app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -136,8 +134,63 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// GET /api/auth/me
+app.get("/api/auth/me", auth, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
+  if (!rows.length) return res.status(404).json({ error: "Utilisateur introuvable" });
+  const { password, ...safeUser } = rows[0];
+  res.json(safeUser);
+});
 
+// POST /api/auth/forgot-password
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  try {
+    const { rows } = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+    if (!rows.length) return res.json({ ok: true });
+    const user = rows[0];
+    const token = crypto.randomBytes(32).toString("hex");
+    const exp   = new Date(Date.now() + 60 * 60 * 1000);
+    await pool.query("DELETE FROM twofa WHERE user_id=$1", [user.id]);
+    await pool.query("INSERT INTO twofa (user_id,code,expires_at) VALUES ($1,$2,$3)", [user.id, token, exp]);
+    const resetUrl = `${process.env.FRONTEND_URL}?reset=true&token=${token}&userId=${user.id}`;
+    await resend.emails.send({
+      from: `PédagoGen <noreply@${process.env.RESEND_DOMAIN || "pedagogen.fr"}>`,
+      to:   user.email,
+      subject: "Réinitialisation de votre mot de passe PédagoGen",
+      html: `<div style="font-family:sans-serif;padding:24px;max-width:480px">
+        <h2>🔑 Réinitialisation de mot de passe</h2>
+        <p>Bonjour ${user.prenom},</p>
+        <p>Cliquez sur le bouton ci-dessous pour réinitialiser votre mot de passe :</p>
+        <a href="${resetUrl}" style="display:inline-block;padding:12px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">Réinitialiser mon mot de passe</a>
+        <p style="color:#64748b;font-size:13px">Ce lien expire dans 1 heure.</p>
+      </div>`
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
 
+// POST /api/auth/reset-password
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { userId, token, password } = req.body;
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM twofa WHERE user_id=$1 AND code=$2 AND expires_at > NOW()",
+      [userId, token]
+    );
+    if (!rows.length) return res.status(401).json({ error: "Lien invalide ou expiré" });
+    const hash = await bcrypt.hash(password, 10);
+    await pool.query("UPDATE users SET password=$1 WHERE id=$2", [hash, userId]);
+    await pool.query("DELETE FROM twofa WHERE user_id=$1", [userId]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
 
 // ════════════════════════════════════════════
 // USERS
@@ -145,7 +198,9 @@ app.post("/api/auth/login", async (req, res) => {
 
 // GET /api/users
 app.get("/api/users", auth, adminOnly, async (req, res) => {
-  const { rows } = await pool.query("SELECT id,role,nom,prenom,email,mobile,entreprise,siren,created_at FROM users ORDER BY created_at DESC");
+  const { rows } = await pool.query(
+    "SELECT id,role,nom,prenom,email,mobile,entreprise,siren,created_at FROM users ORDER BY created_at DESC"
+  );
   res.json(rows);
 });
 
@@ -167,7 +222,6 @@ app.post("/api/users", auth, adminOnly, async (req, res) => {
 
 // PUT /api/users/:id
 app.put("/api/users/:id", auth, async (req, res) => {
-  // Un user peut modifier son propre profil ; un admin peut tout modifier
   if (req.user.role !== "admin" && req.user.id !== parseInt(req.params.id))
     return res.status(403).json({ error: "Accès refusé" });
   const { nom,prenom,email,password,mobile,entreprise,siren } = req.body;
@@ -209,7 +263,6 @@ app.get("/api/demands", auth, async (req, res) => {
     params = [];
   }
   const { rows } = await pool.query(query, params);
-  // Enrichir avec docs et notes
   const enriched = await Promise.all(rows.map(async d => {
     const docs  = await pool.query("SELECT id,nom,file_type,taille,text_content,data_url FROM documents WHERE demand_id=$1", [d.id]);
     const notes = await pool.query("SELECT n.*,u.nom,u.prenom FROM notes n JOIN users u ON n.auteur_id=u.id WHERE n.demand_id=$1 ORDER BY n.created_at ASC", [d.id]);
@@ -217,8 +270,20 @@ app.get("/api/demands", auth, async (req, res) => {
       ...d,
       client: d.entreprise || `${d.prenom} ${d.nom}`,
       date: new Date(d.created_at).toLocaleDateString("fr-FR"),
-      docs:  docs.rows.map(doc => ({ name:doc.nom, fileType:doc.file_type, size:doc.taille, text:doc.text_content, dataUrl:doc.data_url })),
-      notes: notes.rows.map(n => ({ id:n.id, text:n.texte, author:n.auteur_role==="client"?"Client":"Équipe", date:new Date(n.created_at).toLocaleString("fr-FR") })),
+      docs:  docs.rows.map(doc => ({
+        id: doc.id,
+        name: doc.nom,
+        fileType: doc.file_type,
+        size: doc.taille,
+        text: doc.text_content,
+        dataUrl: doc.data_url
+      })),
+      notes: notes.rows.map(n => ({
+        id: n.id,
+        text: n.texte,
+        author: n.auteur_role === "client" ? "Client" : "Équipe",
+        date: new Date(n.created_at).toLocaleString("fr-FR")
+      })),
     };
   }));
   res.json(enriched);
@@ -226,23 +291,28 @@ app.get("/api/demands", auth, async (req, res) => {
 
 // POST /api/demands
 app.post("/api/demands", auth, async (req, res) => {
-  const { titre,public:pub,duree,objectif,ton,docs } = req.body;
+  const { titre, public: pub, duree, objectif, ton, docs } = req.body;
   try {
     const { rows } = await pool.query(
       "INSERT INTO demands (client_id,titre,public,duree,objectif,ton,statut) VALUES ($1,$2,$3,$4,$5,$6,'Déposé') RETURNING *",
-      [req.user.id,titre,pub,duree,objectif,ton]
+      [req.user.id, titre, pub, duree, objectif, ton]
     );
     const demand = rows[0];
-    // Insérer les documents
+    const cleanStr = str => str ? str.replace(/\x00/g, "") : "";
     if (docs?.length) {
       for (const doc of docs) {
         await pool.query(
           "INSERT INTO documents (demand_id,nom,file_type,taille,text_content,data_url) VALUES ($1,$2,$3,$4,$5,$6)",
-          [demand.id, doc.name, doc.fileType, doc.size, (doc.text||"").replace(/\x00/g,""), (doc.dataUrl||"").replace(/\x00/g,"")]
+          [demand.id, doc.name, doc.fileType, doc.size, cleanStr(doc.text||""), cleanStr(doc.dataUrl||"")]
         );
       }
     }
-    res.json({ ...demand, date: new Date(demand.created_at).toLocaleDateString("fr-FR"), docs:docs||[], notes:[] });
+    res.json({
+      ...demand,
+      date: new Date(demand.created_at).toLocaleDateString("fr-FR"),
+      docs: docs || [],
+      notes: []
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Erreur serveur" });
@@ -252,32 +322,62 @@ app.post("/api/demands", auth, async (req, res) => {
 // PUT /api/demands/:id/statut
 app.put("/api/demands/:id/statut", auth, async (req, res) => {
   const { statut } = req.body;
-  // Seul le client peut valider, seul le gestionnaire peut avancer les autres statuts
-  if (statut === "Validé" && req.user.role !== "client") return res.status(403).json({ error: "Seul le client peut valider" });
-  if (statut !== "Validé" && req.user.role === "client")  return res.status(403).json({ error: "Action non autorisée" });
+  if (statut === "Validé" && req.user.role !== "client")
+    return res.status(403).json({ error: "Seul le client peut valider" });
+  if (statut !== "Validé" && req.user.role === "client")
+    return res.status(403).json({ error: "Action non autorisée" });
   await pool.query("UPDATE demands SET statut=$1 WHERE id=$2", [statut, req.params.id]);
   res.json({ ok: true });
 });
 
-// PUT /api/demands/:id/result
+// PUT /api/demands/:id/result (gestionnaire)
 app.put("/api/demands/:id/result", auth, gestOnly, async (req, res) => {
   const { result, statut } = req.body;
-  // Vérifier que la demande n'est pas verrouillée
   const { rows } = await pool.query("SELECT statut FROM demands WHERE id=$1", [req.params.id]);
   if (rows[0]?.statut === "Validé") return res.status(403).json({ error: "Matrice verrouillée" });
-  await pool.query("UPDATE demands SET result=$1, statut=COALESCE($2,statut) WHERE id=$3", [JSON.stringify(result), statut||null, req.params.id]);
+  await pool.query(
+    "UPDATE demands SET result=$1, statut=COALESCE($2,statut) WHERE id=$3",
+    [JSON.stringify(result), statut || null, req.params.id]
+  );
   res.json({ ok: true });
 });
 
-// PUT /api/demands/:id/result (client peut aussi modifier si pas validé)
+// PUT /api/demands/:id/result-client (client)
 app.put("/api/demands/:id/result-client", auth, async (req, res) => {
   const { result } = req.body;
   const { rows } = await pool.query("SELECT statut,client_id FROM demands WHERE id=$1", [req.params.id]);
   if (!rows.length) return res.status(404).json({ error: "Demande introuvable" });
   if (rows[0].statut === "Validé") return res.status(403).json({ error: "Matrice verrouillée" });
-  if (req.user.role === "client" && rows[0].client_id !== req.user.id) return res.status(403).json({ error: "Accès refusé" });
+  if (req.user.role === "client" && rows[0].client_id !== req.user.id)
+    return res.status(403).json({ error: "Accès refusé" });
   await pool.query("UPDATE demands SET result=$1 WHERE id=$2", [JSON.stringify(result), req.params.id]);
   res.json({ ok: true });
+});
+
+// ════════════════════════════════════════════
+// DOCUMENTS
+// ════════════════════════════════════════════
+
+// DELETE /api/documents/:id
+app.delete("/api/documents/:id", auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT d.client_id, d.statut FROM documents doc
+       JOIN demands d ON doc.demand_id = d.id
+       WHERE doc.id = $1`, [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Document introuvable" });
+    const demand = rows[0];
+    if (req.user.role === "client" && demand.client_id !== req.user.id)
+      return res.status(403).json({ error: "Accès refusé" });
+    if (["Envoyé au client","Validé"].includes(demand.statut))
+      return res.status(403).json({ error: "Impossible de supprimer après envoi" });
+    await pool.query("DELETE FROM documents WHERE id=$1", [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
 });
 
 // ════════════════════════════════════════════
@@ -310,8 +410,7 @@ app.post("/api/demands/:id/generate", auth, gestOnly, async (req, res) => {
   if (!rows.length) return res.status(404).json({ error: "Demande introuvable" });
   const demand = rows[0];
   const docs   = await pool.query("SELECT text_content FROM documents WHERE demand_id=$1", [demand.id]);
-  const src    = docs.rows.map(d=>d.text_content).filter(Boolean).join("\n").slice(0,1200);
-
+  const src    = docs.rows.map(d => d.text_content).filter(Boolean).join("\n").slice(0, 1200);
   try {
     const msg = await ai.messages.create({
       model: "claude-sonnet-4-20250514",
@@ -326,13 +425,14 @@ JSON valide UNIQUEMENT sans markdown. Max 3 obj généraux, 5 obj péda, 4 modul
 {"objectifs_generaux":[{"titre":"","description":""}],"objectifs_pedagogiques":[{"code":"OP1","intitule":"","niveau_bloom":"","modalite":""}],"programme":[{"module":"","duree":"","contenu":[""],"methodes":""}]}`
       }]
     });
-
-    const raw   = msg.content.map(b=>b.text||"").join("").trim();
+    const raw   = msg.content.map(b => b.text || "").join("").trim();
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error("Pas de JSON dans la réponse");
     const result = JSON.parse(match[0]);
-
-    await pool.query("UPDATE demands SET result=$1, statut='Généré' WHERE id=$2", [JSON.stringify(result), demand.id]);
+    await pool.query(
+      "UPDATE demands SET result=$1, statut='Généré' WHERE id=$2",
+      [JSON.stringify(result), demand.id]
+    );
     res.json({ result, statut: "Généré" });
   } catch (e) {
     console.error(e);
