@@ -238,7 +238,7 @@ app.post("/api/demands", auth, async (req, res) => {
       for (const doc of docs) {
         await pool.query(
           "INSERT INTO documents (demand_id,nom,file_type,taille,text_content,data_url) VALUES ($1,$2,$3,$4,$5,$6)",
-          [demand.id, doc.name, doc.fileType, doc.size, doc.text||"", doc.dataUrl||""]
+          [demand.id, doc.name, doc.fileType, doc.size, (doc.text||"").replace(/\x00/g,""), (doc.dataUrl||"").replace(/\x00/g,"")]
         );
       }
     }
